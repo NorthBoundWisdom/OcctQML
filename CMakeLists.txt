@@ -9,26 +9,32 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Quick OpenGL Gui Qml)
+find_package(OpenGL REQUIRED)
+find_package(Qt6 REQUIRED COMPONENTS Core OpenGLWidgets Quick Widgets OpenGL Gui Qml)
+
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}")
+include(DeployQt)
 
 find_package(OpenCASCADE REQUIRED)
 
 set(OCC_QML_SOURCES
-    main_qml.cpp
-    OccQuickItem.cpp
+    main.cpp
+    OccViewerItem.cpp
     OCCRenderer.cpp
     OcctGlTools.cpp
+    OccSceneManager.cpp
 )
 
 set(OCC_QML_HEADERS
-    OccQuickItem.h
+    OccViewerItem.h
     OCCRenderer.h
     OcctFrameBuffer.h
     OcctGlTools.h
+    OccSceneManager.h
 )
 
 set(OCC_QML_RESOURCES
@@ -54,8 +60,20 @@ target_include_directories(OccQml PRIVATE
 target_link_libraries(OccQml PRIVATE
     Qt6::Core
     Qt6::Quick
+    Qt6::Widgets
     Qt6::OpenGL
     Qt6::Gui
     Qt6::Qml
+    OpenGL::GL
     ${OpenCASCADE_LIBRARIES}
     )
+
+deploy_qt_dependencies(
+    TARGET_NAME OccQml
+    QML_DIR ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+# add subdir if exists
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/OccQWidget)
+    add_subdirectory(OccQWidget)
+endif()

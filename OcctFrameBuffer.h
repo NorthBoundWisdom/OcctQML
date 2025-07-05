@@ -17,7 +17,9 @@ class OcctQtFrameBuffer : public OpenGl_FrameBuffer
 
 public:
     //! Empty constructor.
-    OcctQtFrameBuffer() {}
+    OcctQtFrameBuffer()
+    {
+    }
 
     //! Make this FBO active in context.
     virtual void BindBuffer(const Handle(OpenGl_Context) & theGlCtx) override
@@ -27,14 +29,16 @@ public:
     }
 
     //! Make this FBO as drawing target in context.
-    virtual void BindDrawBuffer(const Handle(OpenGl_Context) & theGlCtx) override
+    virtual void BindDrawBuffer(const Handle(OpenGl_Context) &
+                                theGlCtx) override
     {
         OpenGl_FrameBuffer::BindDrawBuffer(theGlCtx);
         theGlCtx->SetFrameBufferSRGB(true, false);
     }
 
     //! Make this FBO as reading source in context.
-    virtual void BindReadBuffer(const Handle(OpenGl_Context) & theGlCtx) override
+    virtual void BindReadBuffer(const Handle(OpenGl_Context) &
+                                theGlCtx) override
     {
         OpenGl_FrameBuffer::BindReadBuffer(theGlCtx);
     }

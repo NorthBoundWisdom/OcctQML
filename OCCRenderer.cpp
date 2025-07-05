@@ -1,9 +1,16 @@
+#include <iostream>
 #ifdef _WIN32
 #include <windows.h>
 #endif
 
-#include <QGuiApplication>
+#include <QApplication>
+#include <QMessageBox>
 #include <QMouseEvent>
+#include <QOpenGLExtraFunctions>
+#include <QOpenGLFunctions>
+#include <QQuickWindow>
+#include <QScreen>
+#include <QTime>
 
 #include <AIS_Shape.hxx>
 #include <AIS_ViewCube.hxx>
@@ -16,13 +23,15 @@
 #include <OpenGl_GraphicDriver.hxx>
 
 #include "OCCRenderer.h"
-#include "OccQuickItem.h"
+#include "OccViewerItem.h"
 #include "OcctFrameBuffer.h"
 #include "OcctGlTools.h"
 
 namespace geotoys
 {
-OCCRenderer::OCCRenderer(OccQuickItem * /*item*/)
+OCCRenderer::OCCRenderer(const OccViewerItem *item)
+    : quick_item_(item)
+    , scene_manager_(new OccSceneManager())
 {
     Handle(Aspect_DisplayConnection) aDisp = new Aspect_DisplayConnection();
     Handle(OpenGl_GraphicDriver) aDriver = new OpenGl_GraphicDriver(aDisp, false);
@@ -34,158 +43,300 @@ OCCRenderer::OCCRenderer(OccQuickItem * /*item*/)
     aDriver->ChangeOptions().useSystemBuffer = false;
 
     // create viewer
-    myViewer = new V3d_Viewer(aDriver);
-    myViewer->SetDefaultBackgroundColor(Quantity_NOC_BLACK);
-    myViewer->SetDefaultLights();
-    myViewer->SetLightOn();
-    myViewer->ActivateGrid(Aspect_GT_Rectangular, Aspect_GDM_Lines);
+    viewer_ = new V3d_Viewer(aDriver);
+    viewer_->SetDefaultBackgroundColor(Quantity_NOC_BLACK);
+    viewer_->SetDefaultLights();
+    viewer_->SetLightOn();
+    viewer_->ActivateGrid(Aspect_GT_Rectangular, Aspect_GDM_Lines);
+
+    view_cube_ = new AIS_ViewCube();
+    view_cube_->SetViewAnimation(myViewAnimation);
+    view_cube_->SetFixedAnimationLoop(false);
+    view_cube_->SetAutoStartAnimation(true);
+    view_cube_->TransformPersistence()->SetOffset2d(Graphic3d_Vec2i(100, 150));
 
     // create AIS context
-    myContext = new AIS_InteractiveContext(myViewer);
+    context_ = new AIS_InteractiveContext(viewer_);
 
     // note - window will be created later within initializeGL() callback!
-    myView = myViewer->CreateView();
-    myView->SetImmediateUpdate(false);
-#ifndef __APPLE__
-    myView->ChangeRenderingParams().NbMsaaSamples = 4; // warning - affects performance
-#endif
-    myView->ChangeRenderingParams().ToShowStats = true;
-    myView->ChangeRenderingParams().CollectedStats =
+    view_ = viewer_->CreateView();
+    view_->SetImmediateUpdate(false);
+    view_->ChangeRenderingParams().ToShowStats = true;
+    view_->ChangeRenderingParams().CollectedStats =
         (Graphic3d_RenderingParams::
              PerfCounters)(Graphic3d_RenderingParams::PerfCounters_FrameRate |
                            Graphic3d_RenderingParams::PerfCounters_Triangles);
 
-    QSurfaceFormat aGlFormat;
-    aGlFormat.setDepthBufferSize(24);
-    aGlFormat.setStencilBufferSize(8);
-    aDriver->ChangeOptions().contextDebug = aGlFormat.testOption(QSurfaceFormat::DebugContext);
+    view_->ChangeRenderingParams().NbMsaaSamples = 0;
+    view_->ChangeRenderingParams().RenderResolutionScale = 1.0;
+    view_->ChangeRenderingParams().ToEnableDepthPrepass = false;
+    view_->ChangeRenderingParams().ToEnableAlphaToCoverage = false;
 
-// Use compatibility profile and fallback version for WSL2
-#if defined(_WIN32)
-    myIsCoreProfile = true;
-#else
-    myIsCoreProfile = false;
-#endif
-
-    if (myIsCoreProfile)
-    {
-        aGlFormat.setVersion(4, 5);
-        aGlFormat.setProfile(QSurfaceFormat::CoreProfile);
-    }
-    else
-    {
-        // Use a more compatible version for WSL2/D3D12
-        aGlFormat.setVersion(3, 3);
-        aGlFormat.setProfile(QSurfaceFormat::CompatibilityProfile);
-    }
+    scene_manager_->setContext(context_);
+    scene_manager_->setView(view_);
 }
 
 OCCRenderer::~OCCRenderer()
 {
-    // hold on X11 display connection till making another connection active by
-    // glXMakeCurrent() to workaround sudden crash in QOpenGLWidget destructor
-    Handle(Aspect_DisplayConnection) aDisp = myViewer->Driver()->GetDisplayConnection();
+    Handle(Aspect_DisplayConnection) aDisp = viewer_->Driver()->GetDisplayConnection();
 
     // release OCCT viewer
-    myContext->RemoveAll(false);
-    myContext.Nullify();
-    myView->Remove();
-    myView.Nullify();
-    myViewer.Nullify();
-
+    context_->RemoveAll(false);
+    context_.Nullify();
+    view_->Remove();
+    view_.Nullify();
+    viewer_.Nullify();
     aDisp.Nullify();
+
+    if (scene_manager_)
+    {
+        delete scene_manager_;
+        scene_manager_ = nullptr;
+    }
+}
+
+void OCCRenderer::synchronize(QQuickFramebufferObject *item)
+{
+    scale_ = item->window()->devicePixelRatio();
 }
 
 void OCCRenderer::render()
 {
-    if (myView->Window().IsNull())
+    QString times = "[" + QTime::currentTime().toString("hh:mm:ss.zzz") + "]";
+    std::cout << times.toStdString() << " render" << std::endl;
+
+    if (view_->Window().IsNull())
     {
         return;
     }
 
     // wrap FBO created by QQuickFramebufferObject
-    Handle(OpenGl_Context) aGlCtx = OcctGlTools::GetGlContext(myView);
+    Handle(OpenGl_Context) aGlCtx = OcctGlTools::GetGlContext(view_);
     Handle(OpenGl_FrameBuffer) aDefaultFbo = aGlCtx->DefaultFrameBuffer();
     if (aDefaultFbo.IsNull())
     {
+        std::cout << "[OCCRenderer] Creating new framebuffer" << std::endl;
         aDefaultFbo = new OcctQtFrameBuffer();
         aGlCtx->SetDefaultFrameBuffer(aDefaultFbo);
     }
     if (!aDefaultFbo->InitWrapper(aGlCtx))
     {
+        std::cout << "[render] aDefaultFbo->InitWrapper(aGlCtx) failed" << std::endl;
         aDefaultFbo.Nullify();
-        Message::DefaultMessenger()->Send("Default FBO wrapper creation failed", Message_Fail);
         return;
     }
 
+    aDefaultFbo->SetupViewport(aGlCtx);
+
     Graphic3d_Vec2i aViewSizeOld;
     Graphic3d_Vec2i aViewSizeNew = aDefaultFbo->GetVPSize();
-    Handle(Aspect_NeutralWindow) aWindow = Handle(Aspect_NeutralWindow)::DownCast(myView->Window());
+    Handle(Aspect_NeutralWindow) aWindow = Handle(Aspect_NeutralWindow)::DownCast(view_->Window());
     aWindow->Size(aViewSizeOld.x(), aViewSizeOld.y());
     if (aViewSizeNew != aViewSizeOld)
     {
         aWindow->SetSize(aViewSizeNew.x(), aViewSizeNew.y());
-        myView->MustBeResized();
-        myView->Invalidate();
+        view_->MustBeResized();
+        view_->Invalidate();
 
-        for (Handle(V3d_View) aSubviewIter : myView->Subviews())
+        for (Handle(V3d_View) aSubviewIter : view_->Subviews())
         {
             aSubviewIter->MustBeResized();
             aSubviewIter->Invalidate();
             aDefaultFbo->SetupViewport(aGlCtx);
         }
     }
+    if (pending_fit_all_)
+    {
+        view_->FitAll();
+        view_->ZFitAll();
+        pending_fit_all_ = false;
+    }
 
-    myView->InvalidateImmediate();
-    FlushViewEvents(myContext, myView, true);
+    // Only display viewcube once during initialization, not every frame
+    // context_->Display(view_cube_, 0, 0, false);
+    view_->InvalidateImmediate();
+    FlushViewEvents(context_, view_, true);
 }
 
 QOpenGLFramebufferObject *OCCRenderer::createFramebufferObject(const QSize &size)
 {
     QOpenGLFramebufferObjectFormat format;
     format.setAttachment(QOpenGLFramebufferObject::CombinedDepthStencil);
-    format.setSamples(4);
+    format.setSamples(0);
+    format.setTextureTarget(GL_TEXTURE_2D);
+    format.setInternalTextureFormat(GL_RGBA8);
 
-    // Initialize OpenGL context if needed
-    if (myView->Window().IsNull())
+    if (view_->Window().IsNull())
     {
+        std::cout << "[OCCRenderer] Initializing OpenGL context\n";
         initializeGL(size);
     }
 
     return new QOpenGLFramebufferObject(size, format);
 }
 
-void OCCRenderer::initializeGL(const QSize &size)
+void OCCRenderer::initializeGL(const QSize &fboSize)
 {
-    const Graphic3d_Vec2i aViewSize(size.width(), size.height());
+    const Graphic3d_Vec2i aViewSize(fboSize.width(), fboSize.height());
 
-    Handle(OpenGl_Context) aGlCtx = new OpenGl_Context();
-
-    // Try first with the current profile setting
-    bool contextInitialized = aGlCtx->Init(myIsCoreProfile);
-
-    // If failed and we were trying core profile, fallback to compatibility
-    // profile
-    if (!contextInitialized && myIsCoreProfile)
+    // Get native window handle
+    Aspect_Drawable aNativeWin;
+#ifdef _WIN32
+    std::cout << "[initializeGL] wglGetCurrentDC\n";
+    is_core_profile_ = true;
+    HDC aWglDevCtx = wglGetCurrentDC();
+    HWND aWglWin = WindowFromDC(aWglDevCtx);
+    aNativeWin = (Aspect_Drawable)aWglWin;
+#else
+    is_core_profile_ = false;
+    if (quick_item_ && quick_item_->window())
     {
-        Message::SendWarning() << "Warning: Core profile context initialization "
-                                  "failed, trying compatibility profile";
-        myIsCoreProfile = false;
-        contextInitialized = aGlCtx->Init(myIsCoreProfile);
-    }
-
-    Handle(Aspect_NeutralWindow) aWindow = Handle(Aspect_NeutralWindow)::DownCast(myView->Window());
-    if (!aWindow.IsNull())
-    {
-        aWindow->SetSize(aViewSize.x(), aViewSize.y());
-        myView->SetWindow(aWindow, aGlCtx->RenderingContext());
+        aNativeWin = (Aspect_Drawable)quick_item_->window()->winId();
     }
     else
     {
+        aNativeWin = 0;
+    }
+#endif
+
+    Handle(OpenGl_Context) aGlCtx = new OpenGl_Context();
+    bool contextInitialized = aGlCtx->Init(is_core_profile_);
+    if (!contextInitialized && is_core_profile_)
+    {
+        is_core_profile_ = false;
+        contextInitialized = aGlCtx->Init(is_core_profile_);
+    }
+
+    Handle(Aspect_NeutralWindow) aWindow = Handle(Aspect_NeutralWindow)::DownCast(view_->Window());
+    if (!aWindow.IsNull())
+    {
+        std::cout << "[initializeGL] aWindow is not null, setting native window handle\n";
+    }
+    else
+    {
+        std::cout << "[initializeGL] aWindow is null, creating new window\n";
         aWindow = new Aspect_NeutralWindow();
         aWindow->SetVirtual(true);
-        aWindow->SetSize(aViewSize.x(), aViewSize.y());
-        myView->SetWindow(aWindow, aGlCtx->RenderingContext());
+    }
+
+    aWindow->SetNativeHandle(aNativeWin);
+    aWindow->SetSize(aViewSize.x(), aViewSize.y());
+    view_->SetWindow(aWindow, aGlCtx->RenderingContext());
+
+    // Display viewcube after window is set
+    context_->Display(view_cube_, 0, 0, false);
+}
+
+void OCCRenderer::handleMousePressEvent(QMouseEvent *event)
+{
+    if (view_.IsNull() || myToAskNextFrame)
+        return;
+
+    const Graphic3d_Vec2i aClickPos(static_cast<int>(event->position().x() * scale_),
+                                    static_cast<int>(event->position().y() * scale_));
+    const Aspect_VKeyFlags aFlags = OcctGlTools::qtMouseModifiers2VKeys(event->modifiers());
+    const Aspect_VKeyMouse aButton = OcctGlTools::qtMouseButtons2VKeys(event->button());
+
+    if (UpdateMouseButtons(aClickPos, aButton, aFlags, false))
+    {
+        std::cout << "UpdateMouseButtons success" << std::endl;
+    }
+}
+
+void OCCRenderer::handleMouseReleaseEvent(QMouseEvent *event)
+{
+    if (view_.IsNull() || myToAskNextFrame)
+        return;
+
+    const Graphic3d_Vec2i aClickPos(static_cast<int>(event->position().x() * scale_),
+                                    static_cast<int>(event->position().y() * scale_));
+    const Aspect_VKeyFlags aFlags = OcctGlTools::qtMouseModifiers2VKeys(event->modifiers());
+    const Aspect_VKeyMouse aButtons = OcctGlTools::qtMouseButtons2VKeys(event->buttons());
+    std::ignore = UpdateMouseButtons(aClickPos, aButtons, aFlags, true);
+}
+
+void OCCRenderer::handleMouseMoveEvent(QMouseEvent *event)
+{
+    if (view_.IsNull() || myToAskNextFrame)
+        return;
+
+    const Graphic3d_Vec2i aNewPos(static_cast<int>(event->position().x() * scale_),
+                                  static_cast<int>(event->position().y() * scale_));
+    std::ignore =
+        UpdateMousePosition(aNewPos, PressedMouseButtons(),
+                            OcctGlTools::qtMouseModifiers2VKeys(event->modifiers()), false);
+}
+
+void OCCRenderer::handleHoverMoveEvent(QHoverEvent *event)
+{
+    if (view_.IsNull() || myToAskNextFrame)
+        return;
+
+    const Graphic3d_Vec2i aNewPos(static_cast<int>(event->position().x() * scale_),
+                                  static_cast<int>(event->position().y() * scale_));
+    std::ignore =
+        UpdateMousePosition(aNewPos, Aspect_VKeyMouse_NONE,
+                            OcctGlTools::qtMouseModifiers2VKeys(event->modifiers()), false);
+}
+
+void OCCRenderer::fitAll()
+{
+    if (!view_.IsNull())
+    {
+        pending_fit_all_ = true;
+    }
+}
+
+void OCCRenderer::handleWheelEvent(QWheelEvent *event)
+{
+    if (view_.IsNull() || myToAskNextFrame)
+        return;
+
+    const Graphic3d_Vec2i aPos(static_cast<int>(event->position().x() * scale_),
+                               static_cast<int>(event->position().y() * scale_));
+
+    const double aDelta = double(event->angleDelta().y()) / 8.0;
+
+    std::ignore = UpdateZoom(Aspect_ScrollDelta(aPos, aDelta));
+}
+
+void OCCRenderer::setViewCubeSize(double size)
+{
+    if (!view_cube_.IsNull())
+    {
+        view_cube_->SetSize(size);
+        if (!context_.IsNull())
+        {
+            context_->Update(view_cube_, false);
+        }
+    }
+}
+
+void OCCRenderer::setViewCubePosition(int x, int y)
+{
+    if (!view_cube_.IsNull())
+    {
+        Handle(Graphic3d_TransformPers) transform = view_cube_->TransformPersistence();
+        if (!transform.IsNull())
+        {
+            transform->SetOffset2d(Graphic3d_Vec2i(x, y));
+            if (!context_.IsNull())
+            {
+                context_->Update(view_cube_, false);
+            }
+        }
+    }
+}
+
+void OCCRenderer::handleViewRedraw(const Handle(AIS_InteractiveContext) & theCtx,
+                                   const Handle(V3d_View) & theView)
+{
+    AIS_ViewController::handleViewRedraw(theCtx, theView);
+
+    if (myToAskNextFrame && quick_item_)
+    {
+        QMetaObject::invokeMethod(const_cast<OccViewerItem *>(quick_item_), "update",
+                                  Qt::QueuedConnection);
     }
 }
 } // namespace geotoys

@@ -6,6 +6,10 @@ This project demonstrates the integration of Open CASCADE Technology (OCCT) 3D v
 
 This demo shows how to embed OCCT 3D viewer within a QML application using custom QQuickItem. The implementation provides a bridge between OCCT's OpenGL rendering and Qt's QML scene graph.
 
+![OCCT QML Integration Demo](./assets/image.png)
+
+*Screenshot showing OCCT 3D viewer integrated within QML application*
+
 ## Features
 
 - OCCT 3D viewer integration with QML

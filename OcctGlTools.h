@@ -31,6 +31,7 @@ public:
     static Aspect_VKey qtKey2VKey(int theKey);
     static Aspect_VKeyFlags qtMouseModifiers2VKeys(Qt::KeyboardModifiers theModifiers);
     static Aspect_VKeyMouse qtMouseButtons2VKeys(Qt::MouseButtons theButtons);
+    static Graphic3d_Vec2i qtPointToOcct(const QPoint &qtPoint);
 };
 
 #endif // _OcctGlTools_HeaderFile
